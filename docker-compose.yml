@@ -1,0 +1,26 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: building_management
+      MYSQL_ROOT_PASSWORD: localdev
+    ports: ["3306:3306"]
+    volumes: ["mysql_data:/var/lib/mysql", "./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro"]
+  api:
+    build: ./server
+    environment:
+      DATABASE_HOST: mysql
+      DATABASE_NAME: building_management
+      DATABASE_USER: root
+      DATABASE_PASSWORD: localdev
+      JWT_SECRET: change-this-for-deployment
+    ports: ["4000:4000"]
+    depends_on: [mysql]
+  client:
+    build: ./client
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  mysql_data:
