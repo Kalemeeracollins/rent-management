@@ -6,6 +6,11 @@ services:
       MYSQL_ROOT_PASSWORD: localdev
     ports: ["3306:3306"]
     volumes: ["mysql_data:/var/lib/mysql", "./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
   api:
     build: ./server
     environment:
@@ -15,7 +20,9 @@ services:
       DATABASE_PASSWORD: localdev
       JWT_SECRET: change-this-for-deployment
     ports: ["4000:4000"]
-    depends_on: [mysql]
+    depends_on:
+      mysql:
+        condition: service_healthy
   client:
     build: ./client
     environment:

@@ -70,8 +70,8 @@ export const buildingPatchSchema = z.object({
   query: z.object({}).optional(),
   params: z.object({ id }).passthrough(),
 });
-export const leaseSchema = z.object({
-  body: z.object({
+const leaseFields = z
+  .object({
     tenant_id: id,
     unit_id: id,
     start_date: date,
@@ -80,9 +80,20 @@ export const leaseSchema = z.object({
     security_deposit: z.coerce.number().nonnegative().optional(),
     payment_due_day: z.coerce.number().int().min(1).max(28).optional(),
     notes: z.string().max(2000).optional(),
-  }),
+  })
+  .refine((value) => value.end_date > value.start_date, {
+    message: "end_date must be after start_date",
+    path: ["end_date"],
+  });
+export const leaseSchema = z.object({
+  body: leaseFields,
   query: z.object({}).optional(),
   params: z.object({}).optional(),
+});
+export const leaseRenewSchema = z.object({
+  body: z.object({ end_date: date, monthly_rent: money.optional() }),
+  query: z.object({}).optional(),
+  params: z.object({ id }).passthrough(),
 });
 export const paymentSchema = z.object({
   body: z.object({
@@ -258,6 +269,32 @@ export const userPatchSchema = z.object({
       password: z.string().min(8).optional(),
     })
     .strict(),
+  query: z.object({}).optional(),
+  params: z.object({ id }).passthrough(),
+});
+export const usersListSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().positive().optional(),
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+    search: z.string().trim().max(100).optional(),
+    role: z.enum(["OWNER", "ADMIN", "ACCOUNTANT", "STAFF"]).optional(),
+    status: z.enum(["ACTIVE", "INACTIVE", "SUSPENDED"]).optional(),
+    sort: z.enum(["name", "email", "role", "created_at", "last_login"]).optional(),
+    order: z.enum(["asc", "desc"]).optional(),
+  }).passthrough(),
+  body: z.object({}).optional(),
+  params: z.object({}).optional(),
+});
+export const leaseAssignmentSchema = z.object({
+  body: z.object({
+    tenant_id: id,
+    start_date: date,
+    end_date: date,
+    monthly_rent: money,
+    security_deposit: z.coerce.number().nonnegative().optional(),
+    payment_due_day: z.coerce.number().int().min(1).max(28).optional(),
+    notes: z.string().max(2000).optional(),
+  }).refine((value) => value.end_date > value.start_date, { message: "end_date must be after start_date", path: ["end_date"] }),
   query: z.object({}).optional(),
   params: z.object({ id }).passthrough(),
 });

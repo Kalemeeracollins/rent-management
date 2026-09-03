@@ -5,12 +5,14 @@ A full-stack building and tenant management demo branded for CK WEB TECH. The cl
 ## Start
 
 1. Copy `.env.example` to `.env` and set database values.
-2. Start MySQL and run `npm install && npm run migrate` in `server` to create the `building_management` schema.
+2. Start MySQL. The API automatically creates the `building_management` database, applies pending migrations, and only then starts listening. You can also run `npm run migrate` in `server` manually.
 3. Run `npm install && npm run seed` in `server` to provision the owner and fictional tenant leases.
 4. Run `npm start` in `server`.
 5. Run `npm install && npm run dev` in `client`.
 6. Open `http://localhost:3000`; sign in with `demo.owner@example.com` / `DemoPassword123!`.
 7. API health: `http://localhost:4000/api/health`.
+
+The users page supports server-side filtering by `search`, `role`, and `status`, with pagination via `page` and `limit`. Rooms can be created from the Rooms & shops page and assigned atomically to active tenants through the room assignment API.
 
 Docker: `docker compose up --build` starts MySQL, API, and client. Run `docker compose exec api npm run seed` once MySQL is ready.
 

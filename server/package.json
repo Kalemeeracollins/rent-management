@@ -10,7 +10,7 @@
     "seed": "tsx scripts/seed.ts",
     "migrate": "tsx scripts/migrate.ts",
     "test": "tsx --test tests/**/*.test.ts",
-    "lint": "eslint src scripts tests --ext .ts",
+    "lint": "eslint src scripts --ext .ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

@@ -4,62 +4,807 @@ import { pool } from "../database/pool.js";
 import { AppError } from "../errors/AppError.js";
 import { ok } from "../utils/response.js";
 import { pageMeta, pagination } from "../utils/pagination.js";
-import { login } from "../services/auth.service.js";
 import { audit } from "../services/audit.service.js";
 import { getReceipt, recordPayment } from "../services/finance.service.js";
+import {
+  createLease as createLeaseTransaction,
+  terminateLease as terminateLeaseTransaction,
+} from "../modules/leases/lease.service.js";
 
-export type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;
-export const asyncHandler = (handler: AsyncHandler): AsyncHandler => async (req, res, next) => { try { await handler(req, res, next); } catch (error) { next(error); } };
-const resourceId = (req: Request) => { const value = Number(req.params.id); if (!Number.isInteger(value) || value < 1) throw new AppError(400, "Invalid resource id"); return value; };
+export type AsyncHandler = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => Promise<unknown>;
+export const asyncHandler =
+  (handler: AsyncHandler): AsyncHandler =>
+  async (req, res, next) => {
+    try {
+      await handler(req, res, next);
+    } catch (error) {
+      next(error);
+    }
+  };
+const resourceId = (req: Request) => {
+  const value = Number(req.params.id);
+  if (!Number.isInteger(value) || value < 1)
+    throw new AppError(400, "Invalid resource id");
+  return value;
+};
 const insertId = (result: unknown) => (result as { insertId: number }).insertId;
 
-export const loginController = asyncHandler(async (req, res) => ok(res, await login(req.body.email, req.body.password, req.ip), "Login successful"));
 export const meController = asyncHandler(async (req, res) => ok(res, req.user));
-export const logoutController = asyncHandler(async (req, res) => { await audit(req.user?.id, "LOGOUT", "AUTH", req.user?.id, "User logged out", req.ip); ok(res, null, "Logged out successfully"); });
-export const listUsers = asyncHandler(async (_req, res) => { const [rows] = await pool.query("SELECT id,name,email,phone,role,status,last_login,created_at FROM users ORDER BY name"); ok(res, rows, "Users retrieved"); });
-export const createUser = asyncHandler(async (req, res) => { const hash = await bcrypt.hash(req.body.password, 12); const [result] = await pool.execute("INSERT INTO users(name,email,phone,password_hash,role,status) VALUES(?,?,?,?,?,'ACTIVE')", [req.body.name, req.body.email.toLowerCase(), req.body.phone ?? null, hash, req.body.role]); const id = insertId(result); await audit(req.user?.id, "CREATE_USER", "USER", id, `User ${req.body.email} created`, req.ip); ok(res, { id }, "User created successfully"); });
-export const updateUser = asyncHandler(async (req, res) => { const id = resourceId(req); if (id === req.user?.id && req.body.status && req.body.status !== "ACTIVE") throw new AppError(409, "You cannot deactivate your own account"); const fields: string[] = []; const values: Array<string | number | null> = []; for (const field of ["name", "phone", "role", "status"] as const) if (req.body[field] !== undefined) { fields.push(`${field}=?`); values.push(req.body[field] as string | number | null); } if (req.body.password) { fields.push("password_hash=?"); values.push(await bcrypt.hash(req.body.password, 12)); } if (!fields.length) throw new AppError(400, "No fields to update"); await pool.execute(`UPDATE users SET ${fields.join(",")} WHERE id=?`, [...values, id]); await audit(req.user?.id, "USER_PERMISSION_CHANGE", "USER", id, "User account updated", req.ip); ok(res, { id }, "User updated successfully"); });
+export const logoutController = asyncHandler(async (req, res) => {
+  await audit(
+    req.user?.id,
+    "LOGOUT",
+    "AUTH",
+    req.user?.id,
+    "User logged out",
+    req.ip,
+  );
+  ok(res, null, "Logged out successfully");
+});
+export const listUsers = asyncHandler(async (_req, res) => {
+  const [rows] = await pool.query(
+    "SELECT id,name,email,phone,role,status,last_login,created_at FROM users ORDER BY name",
+  );
+  ok(res, rows, "Users retrieved");
+});
+export const createUser = asyncHandler(async (req, res) => {
+  const hash = await bcrypt.hash(req.body.password, 12);
+  const [result] = await pool.execute(
+    "INSERT INTO users(name,email,phone,password_hash,role,status) VALUES(?,?,?,?,?,'ACTIVE')",
+    [
+      req.body.name,
+      req.body.email.toLowerCase(),
+      req.body.phone ?? null,
+      hash,
+      req.body.role,
+    ],
+  );
+  const id = insertId(result);
+  await audit(
+    req.user?.id,
+    "CREATE_USER",
+    "USER",
+    id,
+    `User ${req.body.email} created`,
+    req.ip,
+  );
+  ok(res, { id }, "User created successfully");
+});
+export const updateUser = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  if (id === req.user?.id && req.body.status && req.body.status !== "ACTIVE")
+    throw new AppError(409, "You cannot deactivate your own account");
+  const fields: string[] = [];
+  const values: Array<string | number | null> = [];
+  for (const field of ["name", "phone", "role", "status"] as const)
+    if (req.body[field] !== undefined) {
+      fields.push(`${field}=?`);
+      values.push(req.body[field] as string | number | null);
+    }
+  if (req.body.password) {
+    fields.push("password_hash=?");
+    values.push(await bcrypt.hash(req.body.password, 12));
+  }
+  if (!fields.length) throw new AppError(400, "No fields to update");
+  await pool.execute(`UPDATE users SET ${fields.join(",")} WHERE id=?`, [
+    ...values,
+    id,
+  ]);
+  await audit(
+    req.user?.id,
+    "USER_PERMISSION_CHANGE",
+    "USER",
+    id,
+    "User account updated",
+    req.ip,
+  );
+  ok(res, { id }, "User updated successfully");
+});
 
-export const listTenants = asyncHandler(async (req, res) => { const { page, limit, offset } = pagination(req.query as { page?: string; limit?: string }); const search = `%${String(req.query.search ?? "")}%`; const [[count]] = await pool.execute("SELECT COUNT(*) AS total FROM tenants WHERE full_name LIKE ? OR business_name LIKE ? OR phone LIKE ?", [search, search, search]) as unknown as [[{ total: number }], unknown]; const [rows] = await pool.execute("SELECT t.id,t.tenant_number,t.full_name,t.business_name,t.phone,t.email,t.status,l.id AS lease_id,u.id AS unit_id,u.unit_number,b.name AS building,COALESCE(l.monthly_rent,0) AS monthly_rent,COALESCE((SELECT SUM(amount) FROM payments p WHERE p.tenant_id=t.id),0) AS amount_paid FROM tenants t LEFT JOIN leases l ON l.tenant_id=t.id AND l.status='ACTIVE' LEFT JOIN units u ON u.id=l.unit_id LEFT JOIN buildings b ON b.id=u.building_id WHERE t.full_name LIKE ? OR t.business_name LIKE ? OR t.phone LIKE ? ORDER BY t.created_at DESC LIMIT ? OFFSET ?", [search, search, search, limit, offset]); ok(res, rows, "Tenants retrieved", pageMeta(page, limit, Number(count.total))); });
-export const getTenant = asyncHandler(async (req, res) => { const id = resourceId(req); const [[tenant]] = await pool.execute("SELECT * FROM tenants WHERE id=?", [id]) as unknown as [[Record<string, unknown>], unknown]; if (!tenant) throw new AppError(404, "Tenant not found"); const [leases] = await pool.execute("SELECT l.*,u.unit_number,b.name AS building FROM leases l JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id WHERE l.tenant_id=? ORDER BY l.start_date DESC", [id]); const [payments] = await pool.execute("SELECT id,receipt_number,amount,payment_date,payment_method,period_from,period_to FROM payments WHERE tenant_id=? ORDER BY payment_date DESC", [id]); const [maintenance] = await pool.execute("SELECT id,request_number,title,status,priority,created_at FROM maintenance_requests WHERE tenant_id=? ORDER BY created_at DESC", [id]); ok(res, { ...tenant, leases, payments, maintenance }); });
-export const createTenant = asyncHandler(async (req, res) => { const number = `TEN-${Date.now()}`; const [result] = await pool.execute("INSERT INTO tenants (tenant_number,full_name,business_name,phone,email,address,national_id_optional,emergency_contact,notes,status) VALUES (?,?,?,?,?,?,?,?,?,'ACTIVE')", [number, req.body.full_name, req.body.business_name ?? null, req.body.phone, req.body.email ?? null, req.body.address ?? null, req.body.national_id_optional ?? null, req.body.emergency_contact ?? null, req.body.notes ?? null]); const id = insertId(result); await audit(req.user?.id, "CREATE_TENANT", "TENANT", id, `Tenant ${number} created`, req.ip); ok(res, { id, tenant_number: number }, "Tenant created successfully"); });
-export const updateTenant = asyncHandler(async (req, res) => { const id = resourceId(req); const fields = ["full_name", "business_name", "phone", "email", "address", "national_id_optional", "emergency_contact", "notes", "status"] as const; const supplied = fields.filter((field) => req.body[field] !== undefined); if (!supplied.length) throw new AppError(400, "No fields to update"); const values = supplied.map((field) => req.body[field] as string | number | null); await pool.execute(`UPDATE tenants SET ${supplied.map((field) => `${field}=?`).join(",")} WHERE id=?`, [...values, id]); await audit(req.user?.id, "UPDATE_TENANT", "TENANT", id, "Tenant updated", req.ip); ok(res, { id }, "Tenant updated successfully"); });
-export const archiveTenant = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE tenants SET status='ARCHIVED' WHERE id=?", [id]); await audit(req.user?.id, "ARCHIVE_TENANT", "TENANT", id, "Tenant archived", req.ip); ok(res, { id }, "Tenant archived successfully"); });
+export const listTenants = asyncHandler(async (req, res) => {
+  const { page, limit, offset } = pagination(
+    req.query as { page?: string; limit?: string },
+  );
+  const search = `%${String(req.query.search ?? "")}%`;
+  const [[count]] = (await pool.execute(
+    "SELECT COUNT(*) AS total FROM tenants WHERE full_name LIKE ? OR business_name LIKE ? OR phone LIKE ?",
+    [search, search, search],
+  )) as unknown as [[{ total: number }], unknown];
+  const [rows] = await pool.execute(
+    "SELECT t.id,t.tenant_number,t.full_name,t.business_name,t.phone,t.email,t.status,l.id AS lease_id,u.id AS unit_id,u.unit_number,b.name AS building,COALESCE(l.monthly_rent,0) AS monthly_rent,COALESCE((SELECT SUM(amount) FROM payments p WHERE p.tenant_id=t.id),0) AS amount_paid FROM tenants t LEFT JOIN leases l ON l.tenant_id=t.id AND l.status='ACTIVE' LEFT JOIN units u ON u.id=l.unit_id LEFT JOIN buildings b ON b.id=u.building_id WHERE t.full_name LIKE ? OR t.business_name LIKE ? OR t.phone LIKE ? ORDER BY t.created_at DESC LIMIT ? OFFSET ?",
+    [search, search, search, limit, offset],
+  );
+  ok(
+    res,
+    rows,
+    "Tenants retrieved",
+    pageMeta(page, limit, Number(count.total)),
+  );
+});
+export const getTenant = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[tenant]] = (await pool.execute("SELECT * FROM tenants WHERE id=?", [
+    id,
+  ])) as unknown as [[Record<string, unknown>], unknown];
+  if (!tenant) throw new AppError(404, "Tenant not found");
+  const [leases] = await pool.execute(
+    "SELECT l.*,u.unit_number,b.name AS building FROM leases l JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id WHERE l.tenant_id=? ORDER BY l.start_date DESC",
+    [id],
+  );
+  const [payments] = await pool.execute(
+    "SELECT id,receipt_number,amount,payment_date,payment_method,period_from,period_to FROM payments WHERE tenant_id=? ORDER BY payment_date DESC",
+    [id],
+  );
+  const [maintenance] = await pool.execute(
+    "SELECT id,request_number,title,status,priority,created_at FROM maintenance_requests WHERE tenant_id=? ORDER BY created_at DESC",
+    [id],
+  );
+  ok(res, { ...tenant, leases, payments, maintenance });
+});
+export const createTenant = asyncHandler(async (req, res) => {
+  const number = `TEN-${Date.now()}`;
+  const [result] = await pool.execute(
+    "INSERT INTO tenants (tenant_number,full_name,business_name,phone,email,address,national_id_optional,emergency_contact,notes,status) VALUES (?,?,?,?,?,?,?,?,?,'ACTIVE')",
+    [
+      number,
+      req.body.full_name,
+      req.body.business_name ?? null,
+      req.body.phone,
+      req.body.email ?? null,
+      req.body.address ?? null,
+      req.body.national_id_optional ?? null,
+      req.body.emergency_contact ?? null,
+      req.body.notes ?? null,
+    ],
+  );
+  const id = insertId(result);
+  await audit(
+    req.user?.id,
+    "CREATE_TENANT",
+    "TENANT",
+    id,
+    `Tenant ${number} created`,
+    req.ip,
+  );
+  ok(res, { id, tenant_number: number }, "Tenant created successfully");
+});
+export const updateTenant = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const fields = [
+    "full_name",
+    "business_name",
+    "phone",
+    "email",
+    "address",
+    "national_id_optional",
+    "emergency_contact",
+    "notes",
+    "status",
+  ] as const;
+  const supplied = fields.filter((field) => req.body[field] !== undefined);
+  if (!supplied.length) throw new AppError(400, "No fields to update");
+  const values = supplied.map(
+    (field) => req.body[field] as string | number | null,
+  );
+  await pool.execute(
+    `UPDATE tenants SET ${supplied.map((field) => `${field}=?`).join(",")} WHERE id=?`,
+    [...values, id],
+  );
+  await audit(
+    req.user?.id,
+    "UPDATE_TENANT",
+    "TENANT",
+    id,
+    "Tenant updated",
+    req.ip,
+  );
+  ok(res, { id }, "Tenant updated successfully");
+});
+export const archiveTenant = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  await pool.execute("UPDATE tenants SET status='ARCHIVED' WHERE id=?", [id]);
+  await audit(
+    req.user?.id,
+    "ARCHIVE_TENANT",
+    "TENANT",
+    id,
+    "Tenant archived",
+    req.ip,
+  );
+  ok(res, { id }, "Tenant archived successfully");
+});
 
-export const listBuildings = asyncHandler(async (req, res) => { const { page, limit, offset } = pagination(req.query as { page?: string; limit?: string }); const search = `%${String(req.query.search ?? "")}%`; const [[count]] = await pool.execute("SELECT COUNT(*) AS total FROM buildings WHERE name LIKE ? OR location LIKE ?", [search, search]) as unknown as [[{ total: number }], unknown]; const [rows] = await pool.execute("SELECT b.id,b.name,b.location,b.description,b.status,COUNT(u.id) AS total_units,COALESCE(SUM(u.status='OCCUPIED'),0) AS occupied_units,COALESCE(SUM(u.monthly_rent),0) AS expected_monthly_rent FROM buildings b LEFT JOIN units u ON u.building_id=b.id WHERE b.name LIKE ? OR b.location LIKE ? GROUP BY b.id ORDER BY b.name LIMIT ? OFFSET ?", [search, search, limit, offset]); ok(res, rows, "Buildings retrieved", pageMeta(page, limit, Number(count.total))); });
-export const getBuilding = asyncHandler(async (req, res) => { const id = resourceId(req); const [[building]] = await pool.execute("SELECT * FROM buildings WHERE id=?", [id]) as unknown as [[Record<string, unknown>], unknown]; if (!building) throw new AppError(404, "Building not found"); const [floors] = await pool.execute("SELECT * FROM floors WHERE building_id=? ORDER BY floor_number", [id]); const [units] = await pool.execute("SELECT * FROM units WHERE building_id=? ORDER BY unit_number", [id]); ok(res, { ...building, floors, units }); });
-export const createBuilding = asyncHandler(async (req, res) => { const [result] = await pool.execute("INSERT INTO buildings(name,location,description,status) VALUES (?,?,?,'ACTIVE')", [req.body.name, req.body.location, req.body.description ?? null]); const id = insertId(result); await audit(req.user?.id, "CREATE_BUILDING", "BUILDING", id, `Building ${req.body.name} created`, req.ip); ok(res, { id }, "Building created successfully"); });
-export const updateBuilding = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE buildings SET name=COALESCE(?,name),location=COALESCE(?,location),description=COALESCE(?,description) WHERE id=?", [req.body.name ?? null, req.body.location ?? null, req.body.description ?? null, id]); await audit(req.user?.id, "UPDATE_BUILDING", "BUILDING", id, "Building updated", req.ip); ok(res, { id }, "Building updated successfully"); });
-export const archiveBuilding = asyncHandler(async (req, res) => { const id = resourceId(req); const [[units]] = await pool.execute("SELECT COUNT(*) AS count FROM units WHERE building_id=? AND status='OCCUPIED'", [id]) as unknown as [[{ count: number }], unknown]; if (Number(units.count)) throw new AppError(409, "Occupied buildings cannot be archived"); await pool.execute("UPDATE buildings SET status='ARCHIVED' WHERE id=?", [id]); ok(res, { id }, "Building archived successfully"); });
+export const listBuildings = asyncHandler(async (req, res) => {
+  const { page, limit, offset } = pagination(
+    req.query as { page?: string; limit?: string },
+  );
+  const search = `%${String(req.query.search ?? "")}%`;
+  const [[count]] = (await pool.execute(
+    "SELECT COUNT(*) AS total FROM buildings WHERE name LIKE ? OR location LIKE ?",
+    [search, search],
+  )) as unknown as [[{ total: number }], unknown];
+  const [rows] = await pool.execute(
+    "SELECT b.id,b.name,b.location,b.description,b.status,COUNT(u.id) AS total_units,COALESCE(SUM(u.status='OCCUPIED'),0) AS occupied_units,COALESCE(SUM(u.monthly_rent),0) AS expected_monthly_rent FROM buildings b LEFT JOIN units u ON u.building_id=b.id WHERE b.name LIKE ? OR b.location LIKE ? GROUP BY b.id ORDER BY b.name LIMIT ? OFFSET ?",
+    [search, search, limit, offset],
+  );
+  ok(
+    res,
+    rows,
+    "Buildings retrieved",
+    pageMeta(page, limit, Number(count.total)),
+  );
+});
+export const getBuilding = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[building]] = (await pool.execute(
+    "SELECT * FROM buildings WHERE id=?",
+    [id],
+  )) as unknown as [[Record<string, unknown>], unknown];
+  if (!building) throw new AppError(404, "Building not found");
+  const [floors] = await pool.execute(
+    "SELECT * FROM floors WHERE building_id=? ORDER BY floor_number",
+    [id],
+  );
+  const [units] = await pool.execute(
+    "SELECT * FROM units WHERE building_id=? ORDER BY unit_number",
+    [id],
+  );
+  ok(res, { ...building, floors, units });
+});
+export const createBuilding = asyncHandler(async (req, res) => {
+  const [result] = await pool.execute(
+    "INSERT INTO buildings(name,location,description,status) VALUES (?,?,?,'ACTIVE')",
+    [req.body.name, req.body.location, req.body.description ?? null],
+  );
+  const id = insertId(result);
+  await audit(
+    req.user?.id,
+    "CREATE_BUILDING",
+    "BUILDING",
+    id,
+    `Building ${req.body.name} created`,
+    req.ip,
+  );
+  ok(res, { id }, "Building created successfully");
+});
+export const updateBuilding = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  await pool.execute(
+    "UPDATE buildings SET name=COALESCE(?,name),location=COALESCE(?,location),description=COALESCE(?,description) WHERE id=?",
+    [
+      req.body.name ?? null,
+      req.body.location ?? null,
+      req.body.description ?? null,
+      id,
+    ],
+  );
+  await audit(
+    req.user?.id,
+    "UPDATE_BUILDING",
+    "BUILDING",
+    id,
+    "Building updated",
+    req.ip,
+  );
+  ok(res, { id }, "Building updated successfully");
+});
+export const archiveBuilding = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[units]] = (await pool.execute(
+    "SELECT COUNT(*) AS count FROM units WHERE building_id=? AND status='OCCUPIED'",
+    [id],
+  )) as unknown as [[{ count: number }], unknown];
+  if (Number(units.count))
+    throw new AppError(409, "Occupied buildings cannot be archived");
+  await pool.execute("UPDATE buildings SET status='ARCHIVED' WHERE id=?", [id]);
+  ok(res, { id }, "Building archived successfully");
+});
 
-export const listFloors = asyncHandler(async (req, res) => { const buildingId = req.query.building_id ? Number(req.query.building_id) : null; const [rows] = await pool.query("SELECT f.*,b.name AS building,COUNT(u.id) AS unit_count FROM floors f JOIN buildings b ON b.id=f.building_id LEFT JOIN units u ON u.floor_id=f.id WHERE (? IS NULL OR f.building_id=?) GROUP BY f.id ORDER BY b.name,f.floor_number", [buildingId, buildingId]); ok(res, rows, "Floors retrieved"); });
-export const getFloor = asyncHandler(async (req, res) => { const id = resourceId(req); const [[floor]] = await pool.execute("SELECT f.*,b.name AS building FROM floors f JOIN buildings b ON b.id=f.building_id WHERE f.id=?", [id]) as unknown as [[Record<string, unknown>], unknown]; if (!floor) throw new AppError(404, "Floor not found"); const [units] = await pool.execute("SELECT * FROM units WHERE floor_id=? ORDER BY unit_number", [id]); ok(res, { ...floor, units }); });
-export const createFloor = asyncHandler(async (req, res) => { const [result] = await pool.execute("INSERT INTO floors(building_id,name,floor_number,description) VALUES(?,?,?,?)", [req.body.building_id, req.body.name, req.body.floor_number, req.body.description ?? null]); const id = insertId(result); await audit(req.user?.id, "CREATE_FLOOR", "FLOOR", id, "Floor created", req.ip); ok(res, { id }, "Floor created successfully"); });
-export const updateFloor = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE floors SET name=COALESCE(?,name),floor_number=COALESCE(?,floor_number),description=COALESCE(?,description) WHERE id=?", [req.body.name ?? null, req.body.floor_number ?? null, req.body.description ?? null, id]); await audit(req.user?.id, "UPDATE_FLOOR", "FLOOR", id, "Floor updated", req.ip); ok(res, { id }, "Floor updated successfully"); });
-export const deleteFloor = asyncHandler(async (req, res) => { const id = resourceId(req); const [[units]] = await pool.execute("SELECT COUNT(*) AS count FROM units WHERE floor_id=?", [id]) as unknown as [[{ count: number }], unknown]; if (Number(units.count)) throw new AppError(409, "Floor with units cannot be deleted"); await pool.execute("DELETE FROM floors WHERE id=?", [id]); ok(res, { id }, "Floor deleted successfully"); });
+export const listFloors = asyncHandler(async (req, res) => {
+  const buildingId = req.query.building_id
+    ? Number(req.query.building_id)
+    : null;
+  const [rows] = await pool.query(
+    "SELECT f.*,b.name AS building,COUNT(u.id) AS unit_count FROM floors f JOIN buildings b ON b.id=f.building_id LEFT JOIN units u ON u.floor_id=f.id WHERE (? IS NULL OR f.building_id=?) GROUP BY f.id ORDER BY b.name,f.floor_number",
+    [buildingId, buildingId],
+  );
+  ok(res, rows, "Floors retrieved");
+});
+export const getFloor = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[floor]] = (await pool.execute(
+    "SELECT f.*,b.name AS building FROM floors f JOIN buildings b ON b.id=f.building_id WHERE f.id=?",
+    [id],
+  )) as unknown as [[Record<string, unknown>], unknown];
+  if (!floor) throw new AppError(404, "Floor not found");
+  const [units] = await pool.execute(
+    "SELECT * FROM units WHERE floor_id=? ORDER BY unit_number",
+    [id],
+  );
+  ok(res, { ...floor, units });
+});
+export const createFloor = asyncHandler(async (req, res) => {
+  const [result] = await pool.execute(
+    "INSERT INTO floors(building_id,name,floor_number,description) VALUES(?,?,?,?)",
+    [
+      req.body.building_id,
+      req.body.name,
+      req.body.floor_number,
+      req.body.description ?? null,
+    ],
+  );
+  const id = insertId(result);
+  await audit(
+    req.user?.id,
+    "CREATE_FLOOR",
+    "FLOOR",
+    id,
+    "Floor created",
+    req.ip,
+  );
+  ok(res, { id }, "Floor created successfully");
+});
+export const updateFloor = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  await pool.execute(
+    "UPDATE floors SET name=COALESCE(?,name),floor_number=COALESCE(?,floor_number),description=COALESCE(?,description) WHERE id=?",
+    [
+      req.body.name ?? null,
+      req.body.floor_number ?? null,
+      req.body.description ?? null,
+      id,
+    ],
+  );
+  await audit(
+    req.user?.id,
+    "UPDATE_FLOOR",
+    "FLOOR",
+    id,
+    "Floor updated",
+    req.ip,
+  );
+  ok(res, { id }, "Floor updated successfully");
+});
+export const deleteFloor = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[units]] = (await pool.execute(
+    "SELECT COUNT(*) AS count FROM units WHERE floor_id=?",
+    [id],
+  )) as unknown as [[{ count: number }], unknown];
+  if (Number(units.count))
+    throw new AppError(409, "Floor with units cannot be deleted");
+  await pool.execute("DELETE FROM floors WHERE id=?", [id]);
+  ok(res, { id }, "Floor deleted successfully");
+});
 
-export const listUnits = asyncHandler(async (req, res) => { const search = `%${String(req.query.search ?? "")}%`; const [rows] = await pool.execute("SELECT u.*,b.name AS building,f.name AS floor,l.id AS lease_id,l.tenant_id,t.full_name AS tenant,COALESCE((SELECT SUM(rc.amount_due-rc.amount_paid) FROM rent_charges rc WHERE rc.tenant_id=l.tenant_id AND rc.status<>'PAID'),0) AS balance FROM units u JOIN buildings b ON b.id=u.building_id LEFT JOIN floors f ON f.id=u.floor_id LEFT JOIN leases l ON l.unit_id=u.id AND l.status='ACTIVE' LEFT JOIN tenants t ON t.id=l.tenant_id WHERE u.unit_number LIKE ? OR u.name LIKE ? ORDER BY u.unit_number LIMIT 100", [search, search]); ok(res, rows); });
-export const getUnit = asyncHandler(async (req, res) => { const id = resourceId(req); const [[unit]] = await pool.execute("SELECT u.*,b.name AS building,f.name AS floor FROM units u JOIN buildings b ON b.id=u.building_id LEFT JOIN floors f ON f.id=u.floor_id WHERE u.id=?", [id]) as unknown as [[Record<string, unknown>], unknown]; if (!unit) throw new AppError(404, "Unit not found"); const [leases] = await pool.execute("SELECT l.*,t.full_name AS tenant FROM leases l JOIN tenants t ON t.id=l.tenant_id WHERE l.unit_id=? ORDER BY l.start_date DESC", [id]); ok(res, { ...unit, leases }); });
-export const createUnit = asyncHandler(async (req, res) => { const [result] = await pool.execute("INSERT INTO units(building_id,floor_id,unit_number,unit_type,name,description,monthly_rent,status) VALUES(?,?,?,?,?,?,?,?)", [req.body.building_id, req.body.floor_id ?? null, req.body.unit_number, req.body.unit_type, req.body.name ?? null, req.body.description ?? null, req.body.monthly_rent, req.body.status ?? "VACANT"]); const id = insertId(result); await audit(req.user?.id, "CREATE_UNIT", "UNIT", id, "Unit created", req.ip); ok(res, { id }, "Unit created successfully"); });
-export const updateUnit = asyncHandler(async (req, res) => { const id = resourceId(req); const fields = ["floor_id", "unit_number", "unit_type", "name", "description", "monthly_rent", "status"] as const; const supplied = fields.filter((field) => req.body[field] !== undefined); if (!supplied.length) throw new AppError(400, "No fields to update"); const values = supplied.map((field) => req.body[field] as string | number | null); await pool.execute(`UPDATE units SET ${supplied.map((field) => `${field}=?`).join(",")} WHERE id=?`, [...values, id]); await audit(req.user?.id, "UPDATE_UNIT", "UNIT", id, "Unit updated", req.ip); ok(res, { id }, "Unit updated successfully"); });
-export const deleteUnit = asyncHandler(async (req, res) => { const id = resourceId(req); const [[lease]] = await pool.execute("SELECT COUNT(*) AS count FROM leases WHERE unit_id=? AND status IN ('ACTIVE','UPCOMING')", [id]) as unknown as [[{ count: number }], unknown]; if (Number(lease.count)) throw new AppError(409, "Unit with an active lease cannot be deleted"); await pool.execute("DELETE FROM units WHERE id=?", [id]); ok(res, { id }, "Unit deleted successfully"); });
-export const listLeases = asyncHandler(async (_req, res) => { const [rows] = await pool.query("SELECT l.*,t.full_name AS tenant,u.unit_number,b.name AS building FROM leases l JOIN tenants t ON t.id=l.tenant_id JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id ORDER BY l.end_date"); ok(res, rows); });
-export const getLease = asyncHandler(async (req, res) => { const id = resourceId(req); const [[lease]] = await pool.execute("SELECT l.*,t.full_name AS tenant,u.unit_number,b.name AS building FROM leases l JOIN tenants t ON t.id=l.tenant_id JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id WHERE l.id=?", [id]) as unknown as [[Record<string, unknown>], unknown]; if (!lease) throw new AppError(404, "Lease not found"); ok(res, lease); });
-export const createLease = asyncHandler(async (req, res) => { const { tenant_id, unit_id, start_date, end_date, monthly_rent, security_deposit, payment_due_day, notes } = req.body; const [[conflict]] = await pool.execute("SELECT id FROM leases WHERE unit_id=? AND status IN ('ACTIVE','UPCOMING') AND start_date<=? AND end_date>=?", [unit_id, end_date, start_date]) as unknown as [[{ id: number }], unknown]; if (conflict) throw new AppError(409, "Unit already has an overlapping lease"); const [result] = await pool.execute("INSERT INTO leases(tenant_id,unit_id,start_date,end_date,monthly_rent,security_deposit,payment_due_day,status,notes) VALUES (?,?,?,?,?,?,?,'ACTIVE',?)", [tenant_id, unit_id, start_date, end_date, monthly_rent, security_deposit ?? 0, payment_due_day ?? 5, notes ?? null]); const id = insertId(result); await pool.execute("UPDATE units SET status='OCCUPIED' WHERE id=?", [unit_id]); await audit(req.user?.id, "CREATE_LEASE", "LEASE", id, "Lease created", req.ip); ok(res, { id }, "Lease created successfully"); });
-export const updateLease = asyncHandler(async (req, res) => { const id = resourceId(req); const fields = ["start_date", "end_date", "monthly_rent", "security_deposit", "payment_due_day", "status", "notes"] as const; const supplied = fields.filter((field) => req.body[field] !== undefined); if (!supplied.length) throw new AppError(400, "No fields to update"); const values = supplied.map((field) => req.body[field] as string | number | null); await pool.execute(`UPDATE leases SET ${supplied.map((field) => `${field}=?`).join(",")} WHERE id=?`, [...values, id]); if (req.body.status === "TERMINATED" || req.body.status === "EXPIRED") await pool.execute("UPDATE units u JOIN leases l ON l.unit_id=u.id SET u.status='VACANT' WHERE l.id=? AND NOT EXISTS (SELECT 1 FROM leases other WHERE other.unit_id=u.id AND other.id<>l.id AND other.status='ACTIVE')", [id]); await audit(req.user?.id, "UPDATE_LEASE", "LEASE", id, "Lease updated", req.ip); ok(res, { id }, "Lease updated successfully"); });
-export const deleteLease = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE leases SET status='TERMINATED' WHERE id=?", [id]); ok(res, { id }, "Lease terminated successfully"); });
-export const renewLease = asyncHandler(async (req, res) => { const id = resourceId(req); const endDate = String(req.body.end_date); if (!endDate) throw new AppError(400, "New end date is required"); const [[current]] = await pool.execute("SELECT tenant_id,unit_id,monthly_rent FROM leases WHERE id=?", [id]) as unknown as [[{ tenant_id: number; unit_id: number; monthly_rent: number }], unknown]; if (!current) throw new AppError(404, "Lease not found"); const [result] = await pool.execute("INSERT INTO leases(tenant_id,unit_id,start_date,end_date,monthly_rent,security_deposit,payment_due_day,status,notes) SELECT tenant_id,unit_id,end_date,?,?,security_deposit,payment_due_day,'ACTIVE',notes FROM leases WHERE id=?", [endDate, req.body.monthly_rent ?? current.monthly_rent, id]); await pool.execute("UPDATE leases SET status='TERMINATED' WHERE id=?", [id]); ok(res, { id: insertId(result) }, "Lease renewed successfully"); });
-export const terminateLease = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE leases SET status='TERMINATED' WHERE id=?", [id]); await pool.execute("UPDATE units u JOIN leases l ON l.unit_id=u.id SET u.status='VACANT' WHERE l.id=?", [id]); ok(res, { id }, "Lease terminated successfully"); });
-export const listPayments = asyncHandler(async (req, res) => { const { page, limit, offset } = pagination(req.query as { page?: string; limit?: string }); const filters: string[] = []; const values: Array<string | number | null> = []; if (req.query.tenant_id) { filters.push("p.tenant_id=?"); values.push(Number(req.query.tenant_id)); } if (req.query.building_id) { filters.push("b.id=?"); values.push(Number(req.query.building_id)); } if (req.query.payment_method) { filters.push("p.payment_method=?"); values.push(String(req.query.payment_method)); } if (req.query.from) { filters.push("p.payment_date>=?"); values.push(String(req.query.from)); } if (req.query.to) { filters.push("p.payment_date<=?"); values.push(String(req.query.to)); } const where = filters.length ? `WHERE ${filters.join(" AND ")}` : ""; const [rows] = await pool.execute(`SELECT p.id,p.receipt_number,p.payment_date,p.amount,p.payment_method,p.transaction_reference,t.full_name AS tenant,u.unit_number,b.name AS building,usr.name AS recorded_by FROM payments p JOIN tenants t ON t.id=p.tenant_id JOIN units u ON u.id=p.unit_id JOIN buildings b ON b.id=u.building_id JOIN users usr ON usr.id=p.recorded_by ${where} ORDER BY p.payment_date DESC LIMIT ? OFFSET ?`, [...values, limit, offset]); const [[count]] = await pool.execute(`SELECT COUNT(*) AS total FROM payments p JOIN buildings b ON b.id=(SELECT building_id FROM units WHERE id=p.unit_id) ${where}`, values) as unknown as [[{ total: number }], unknown]; ok(res, rows, "Payments retrieved", pageMeta(page, limit, Number(count.total))); });
-export const getPayment = asyncHandler(async (req, res) => ok(res, await getReceipt(resourceId(req)), "Payment retrieved"));
-export const createPayment = asyncHandler(async (req, res) => { const data = await recordPayment({ tenantId: req.body.tenant_id, unitId: req.body.unit_id, leaseId: req.body.lease_id, amount: req.body.amount, paymentDate: req.body.payment_date, paymentMethod: req.body.payment_method, transactionReference: req.body.transaction_reference, periodFrom: req.body.period_from, periodTo: req.body.period_to, notes: req.body.notes }, req.user!.id, req.ip); ok(res, data, "Payment recorded successfully"); });
-export const paymentReceipt = asyncHandler(async (req, res) => ok(res, await getReceipt(resourceId(req)), "Receipt retrieved"));
-export const listMaintenance = asyncHandler(async (req, res) => { const filters: string[] = []; const values: Array<string | number | null> = []; if (req.query.building_id) { filters.push("m.building_id=?"); values.push(Number(req.query.building_id)); } if (req.query.status) { filters.push("m.status=?"); values.push(String(req.query.status)); } if (req.query.priority) { filters.push("m.priority=?"); values.push(String(req.query.priority)); } if (req.query.unit_id) { filters.push("m.unit_id=?"); values.push(Number(req.query.unit_id)); } const where = filters.length ? `WHERE ${filters.join(" AND ")}` : ""; const [rows] = await pool.execute(`SELECT m.*,b.name AS building,u.unit_number,t.full_name AS tenant,usr.name AS assigned_name FROM maintenance_requests m JOIN buildings b ON b.id=m.building_id LEFT JOIN units u ON u.id=m.unit_id LEFT JOIN tenants t ON t.id=m.tenant_id LEFT JOIN users usr ON usr.id=m.assigned_to ${where} ORDER BY m.created_at DESC`, values); ok(res, rows); });
-export const getMaintenance = asyncHandler(async (req, res) => { const id = resourceId(req); const [[item]] = await pool.execute("SELECT m.*,b.name AS building,u.unit_number,t.full_name AS tenant,usr.name AS assigned_name FROM maintenance_requests m JOIN buildings b ON b.id=m.building_id LEFT JOIN units u ON u.id=m.unit_id LEFT JOIN tenants t ON t.id=m.tenant_id LEFT JOIN users usr ON usr.id=m.assigned_to WHERE m.id=?", [id]) as unknown as [[Record<string, unknown>], unknown]; if (!item) throw new AppError(404, "Maintenance request not found"); ok(res, item); });
-export const createMaintenance = asyncHandler(async (req, res) => { const number = `MR-${Date.now()}`; const [result] = await pool.execute("INSERT INTO maintenance_requests(request_number,building_id,unit_id,tenant_id,title,description,priority,status,assigned_to,estimated_cost) VALUES (?,?,?,?,?,?,?,'OPEN',?,?)", [number, req.body.building_id, req.body.unit_id ?? null, req.body.tenant_id ?? null, req.body.title, req.body.description ?? null, req.body.priority ?? "MEDIUM", req.body.assigned_to ?? null, req.body.estimated_cost ?? 0]); const id = insertId(result); await audit(req.user?.id, "CREATE_MAINTENANCE", "MAINTENANCE", id, `Maintenance ${number} created`, req.ip); ok(res, { id, request_number: number }, "Maintenance request created successfully"); });
-export const updateMaintenance = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE maintenance_requests SET status=COALESCE(?,status),priority=COALESCE(?,priority),assigned_to=COALESCE(?,assigned_to),actual_cost=COALESCE(?,actual_cost),resolved_at=IF(?='COMPLETED',NOW(),resolved_at) WHERE id=?", [req.body.status ?? null, req.body.priority ?? null, req.body.assigned_to ?? null, req.body.actual_cost ?? null, req.body.status ?? null, id]); await audit(req.user?.id, "UPDATE_MAINTENANCE", "MAINTENANCE", id, "Maintenance request updated", req.ip); ok(res, { id }, "Maintenance request updated successfully"); });
-export const deleteMaintenance = asyncHandler(async (req, res) => { const id = resourceId(req); await pool.execute("UPDATE maintenance_requests SET status='CANCELLED' WHERE id=?", [id]); await audit(req.user?.id, "DELETE_MAINTENANCE", "MAINTENANCE", id, "Maintenance request cancelled", req.ip); ok(res, { id }, "Maintenance request cancelled successfully"); });
-export const dashboard = asyncHandler(async (_req, res) => { const [propertyRows] = await pool.query("SELECT COUNT(DISTINCT building_id) AS total_buildings,COUNT(*) AS total_units,SUM(status='OCCUPIED') AS occupied_units,SUM(status='VACANT') AS vacant_units,COALESCE(SUM(monthly_rent),0) AS expected_monthly_rent FROM units"); const [floorRows] = await pool.query("SELECT COUNT(*) AS total_floors FROM floors"); const [rentRows] = await pool.query("SELECT COALESCE(SUM(amount),0) AS collected_this_month FROM payments WHERE YEAR(payment_date)=YEAR(CURDATE()) AND MONTH(payment_date)=MONTH(CURDATE())"); const [tenantRows] = await pool.query("SELECT COUNT(*) AS total_tenants,SUM(status='ACTIVE') AS active_tenants FROM tenants"); const [maintenanceRows] = await pool.query("SELECT SUM(status IN ('OPEN','IN_PROGRESS','ON_HOLD')) AS open_requests,SUM(priority='URGENT' AND status<>'COMPLETED') AS urgent_requests,SUM(status='COMPLETED') AS completed_requests,COALESCE(SUM(actual_cost),0) AS maintenance_cost FROM maintenance_requests"); const property = (propertyRows as Array<Record<string, unknown>>)[0]; const floors = (floorRows as Array<Record<string, unknown>>)[0]; const rent = (rentRows as Array<Record<string, unknown>>)[0]; const tenant = (tenantRows as Array<Record<string, unknown>>)[0]; const maintenance = (maintenanceRows as Array<Record<string, unknown>>)[0]; ok(res, { property: { ...property, ...floors, occupancy_percentage: Number(property.total_units) ? Math.round(Number(property.occupied_units) / Number(property.total_units) * 100) : 0 }, rent: { ...rent, outstanding: Number(property.expected_monthly_rent) - Number(rent.collected_this_month), collection_percentage: Number(property.expected_monthly_rent) ? Math.round(Number(rent.collected_this_month) / Number(property.expected_monthly_rent) * 100) : 0 }, tenants: tenant, maintenance }); });
-export const arrears = asyncHandler(async (req, res) => { const filters: string[] = ["rc.amount_due>rc.amount_paid"]; const values: Array<string | number | null> = []; if (req.query.building_id) { filters.push("b.id=?"); values.push(Number(req.query.building_id)); } if (req.query.tenant_id || req.params.tenantId) { filters.push("t.id=?"); values.push(Number(req.query.tenant_id ?? req.params.tenantId)); } const minimumDays = req.query.days_overdue ? Number(req.query.days_overdue) : null; const minimumAmount = req.query.amount ? Number(req.query.amount) : null; const [rows] = await pool.execute(`SELECT t.id AS tenant_id,t.full_name,t.business_name,b.name AS building,u.unit_number,SUM(rc.amount_due) AS amount_due,SUM(rc.amount_paid) AS amount_paid,SUM(rc.amount_due-rc.amount_paid) AS balance,MIN(rc.due_date) AS due_date,GREATEST(DATEDIFF(CURDATE(),MIN(rc.due_date)),0) AS days_overdue,CASE WHEN MIN(rc.due_date)<CURDATE() THEN 'OVERDUE' ELSE 'UNPAID' END AS status FROM rent_charges rc JOIN tenants t ON t.id=rc.tenant_id JOIN units u ON u.id=rc.unit_id JOIN buildings b ON b.id=u.building_id WHERE ${filters.join(" AND ")} GROUP BY t.id,b.name,u.unit_number HAVING (? IS NULL OR days_overdue>=?) AND (? IS NULL OR balance>=?)`, [...values, minimumDays, minimumDays, minimumAmount, minimumAmount]); ok(res, rows); });
-export const auditLogs = asyncHandler(async (_req, res) => { const [rows] = await pool.query("SELECT a.*,u.name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 200"); ok(res, rows); });
-export const report = asyncHandler(async (req, res) => { const sql = req.path.endsWith("occupancy") ? "SELECT b.name,COUNT(u.id) AS total_units,SUM(u.status='OCCUPIED') AS occupied_units,SUM(u.status='VACANT') AS vacant_units FROM buildings b LEFT JOIN units u ON u.building_id=b.id GROUP BY b.id" : req.path.endsWith("rent") ? "SELECT DATE_FORMAT(payment_date,'%Y-%m') AS period,SUM(amount) AS collected FROM payments GROUP BY period ORDER BY period" : "SELECT payment_date,receipt_number,amount,payment_method FROM payments ORDER BY payment_date DESC LIMIT 500"; const [rows] = await pool.query(sql); ok(res, rows, "Report retrieved"); });
+export const listUnits = asyncHandler(async (req, res) => {
+  const search = `%${String(req.query.search ?? "")}%`;
+  const [rows] = await pool.execute(
+    "SELECT u.*,b.name AS building,f.name AS floor,l.id AS lease_id,l.tenant_id,t.full_name AS tenant,COALESCE((SELECT SUM(rc.amount_due-rc.amount_paid) FROM rent_charges rc WHERE rc.tenant_id=l.tenant_id AND rc.status<>'PAID'),0) AS balance FROM units u JOIN buildings b ON b.id=u.building_id LEFT JOIN floors f ON f.id=u.floor_id LEFT JOIN leases l ON l.unit_id=u.id AND l.status='ACTIVE' LEFT JOIN tenants t ON t.id=l.tenant_id WHERE u.unit_number LIKE ? OR u.name LIKE ? ORDER BY u.unit_number LIMIT 100",
+    [search, search],
+  );
+  ok(res, rows);
+});
+export const getUnit = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[unit]] = (await pool.execute(
+    "SELECT u.*,b.name AS building,f.name AS floor FROM units u JOIN buildings b ON b.id=u.building_id LEFT JOIN floors f ON f.id=u.floor_id WHERE u.id=?",
+    [id],
+  )) as unknown as [[Record<string, unknown>], unknown];
+  if (!unit) throw new AppError(404, "Unit not found");
+  const [leases] = await pool.execute(
+    "SELECT l.*,t.full_name AS tenant FROM leases l JOIN tenants t ON t.id=l.tenant_id WHERE l.unit_id=? ORDER BY l.start_date DESC",
+    [id],
+  );
+  ok(res, { ...unit, leases });
+});
+export const createUnit = asyncHandler(async (req, res) => {
+  const [result] = await pool.execute(
+    "INSERT INTO units(building_id,floor_id,unit_number,unit_type,name,description,monthly_rent,status) VALUES(?,?,?,?,?,?,?,?)",
+    [
+      req.body.building_id,
+      req.body.floor_id ?? null,
+      req.body.unit_number,
+      req.body.unit_type,
+      req.body.name ?? null,
+      req.body.description ?? null,
+      req.body.monthly_rent,
+      req.body.status ?? "VACANT",
+    ],
+  );
+  const id = insertId(result);
+  await audit(req.user?.id, "CREATE_UNIT", "UNIT", id, "Unit created", req.ip);
+  ok(res, { id }, "Unit created successfully");
+});
+export const updateUnit = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const fields = [
+    "floor_id",
+    "unit_number",
+    "unit_type",
+    "name",
+    "description",
+    "monthly_rent",
+    "status",
+  ] as const;
+  const supplied = fields.filter((field) => req.body[field] !== undefined);
+  if (!supplied.length) throw new AppError(400, "No fields to update");
+  const values = supplied.map(
+    (field) => req.body[field] as string | number | null,
+  );
+  await pool.execute(
+    `UPDATE units SET ${supplied.map((field) => `${field}=?`).join(",")} WHERE id=?`,
+    [...values, id],
+  );
+  await audit(req.user?.id, "UPDATE_UNIT", "UNIT", id, "Unit updated", req.ip);
+  ok(res, { id }, "Unit updated successfully");
+});
+export const deleteUnit = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[lease]] = (await pool.execute(
+    "SELECT COUNT(*) AS count FROM leases WHERE unit_id=? AND status IN ('ACTIVE','UPCOMING')",
+    [id],
+  )) as unknown as [[{ count: number }], unknown];
+  if (Number(lease.count))
+    throw new AppError(409, "Unit with an active lease cannot be deleted");
+  await pool.execute("DELETE FROM units WHERE id=?", [id]);
+  ok(res, { id }, "Unit deleted successfully");
+});
+export const listLeases = asyncHandler(async (_req, res) => {
+  const [rows] = await pool.query(
+    "SELECT l.*,t.full_name AS tenant,u.unit_number,b.name AS building FROM leases l JOIN tenants t ON t.id=l.tenant_id JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id ORDER BY l.end_date",
+  );
+  ok(res, rows);
+});
+export const getLease = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[lease]] = (await pool.execute(
+    "SELECT l.*,t.full_name AS tenant,u.unit_number,b.name AS building FROM leases l JOIN tenants t ON t.id=l.tenant_id JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id WHERE l.id=?",
+    [id],
+  )) as unknown as [[Record<string, unknown>], unknown];
+  if (!lease) throw new AppError(404, "Lease not found");
+  ok(res, lease);
+});
+export const createLease = asyncHandler(async (req, res) => {
+  const result = await createLeaseTransaction(req.body, req.user!.id, req.ip);
+  ok(res, result, "Lease created successfully");
+});
+export const updateLease = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const fields = [
+    "start_date",
+    "end_date",
+    "monthly_rent",
+    "security_deposit",
+    "payment_due_day",
+    "status",
+    "notes",
+  ] as const;
+  const supplied = fields.filter((field) => req.body[field] !== undefined);
+  if (!supplied.length) throw new AppError(400, "No fields to update");
+  const values = supplied.map(
+    (field) => req.body[field] as string | number | null,
+  );
+  await pool.execute(
+    `UPDATE leases SET ${supplied.map((field) => `${field}=?`).join(",")} WHERE id=?`,
+    [...values, id],
+  );
+  if (req.body.status === "TERMINATED" || req.body.status === "EXPIRED")
+    await pool.execute(
+      "UPDATE units u JOIN leases l ON l.unit_id=u.id SET u.status='VACANT' WHERE l.id=? AND NOT EXISTS (SELECT 1 FROM leases other WHERE other.unit_id=u.id AND other.id<>l.id AND other.status='ACTIVE')",
+      [id],
+    );
+  await audit(
+    req.user?.id,
+    "UPDATE_LEASE",
+    "LEASE",
+    id,
+    "Lease updated",
+    req.ip,
+  );
+  ok(res, { id }, "Lease updated successfully");
+});
+export const deleteLease = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  await pool.execute("UPDATE leases SET status='TERMINATED' WHERE id=?", [id]);
+  ok(res, { id }, "Lease terminated successfully");
+});
+export const renewLease = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const endDate = String(req.body.end_date);
+  if (!endDate) throw new AppError(400, "New end date is required");
+  const [[current]] = (await pool.execute(
+    "SELECT tenant_id,unit_id,monthly_rent FROM leases WHERE id=?",
+    [id],
+  )) as unknown as [
+    [{ tenant_id: number; unit_id: number; monthly_rent: number }],
+    unknown,
+  ];
+  if (!current) throw new AppError(404, "Lease not found");
+  const [result] = await pool.execute(
+    "INSERT INTO leases(tenant_id,unit_id,start_date,end_date,monthly_rent,security_deposit,payment_due_day,status,notes) SELECT tenant_id,unit_id,end_date,?,?,security_deposit,payment_due_day,'ACTIVE',notes FROM leases WHERE id=?",
+    [endDate, req.body.monthly_rent ?? current.monthly_rent, id],
+  );
+  await pool.execute("UPDATE leases SET status='TERMINATED' WHERE id=?", [id]);
+  ok(res, { id: insertId(result) }, "Lease renewed successfully");
+});
+export const terminateLease = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const result = await terminateLeaseTransaction(id, req.user!.id, req.ip);
+  ok(res, result, "Lease terminated successfully");
+});
+export const listPayments = asyncHandler(async (req, res) => {
+  const { page, limit, offset } = pagination(
+    req.query as { page?: string; limit?: string },
+  );
+  const filters: string[] = [];
+  const values: Array<string | number | null> = [];
+  if (req.query.tenant_id) {
+    filters.push("p.tenant_id=?");
+    values.push(Number(req.query.tenant_id));
+  }
+  if (req.query.building_id) {
+    filters.push("b.id=?");
+    values.push(Number(req.query.building_id));
+  }
+  if (req.query.payment_method) {
+    filters.push("p.payment_method=?");
+    values.push(String(req.query.payment_method));
+  }
+  if (req.query.from) {
+    filters.push("p.payment_date>=?");
+    values.push(String(req.query.from));
+  }
+  if (req.query.to) {
+    filters.push("p.payment_date<=?");
+    values.push(String(req.query.to));
+  }
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const [rows] = await pool.execute(
+    `SELECT p.id,p.receipt_number,p.payment_date,p.amount,p.payment_method,p.transaction_reference,t.full_name AS tenant,u.unit_number,b.name AS building,usr.name AS recorded_by FROM payments p JOIN tenants t ON t.id=p.tenant_id JOIN units u ON u.id=p.unit_id JOIN buildings b ON b.id=u.building_id JOIN users usr ON usr.id=p.recorded_by ${where} ORDER BY p.payment_date DESC LIMIT ? OFFSET ?`,
+    [...values, limit, offset],
+  );
+  const [[count]] = (await pool.execute(
+    `SELECT COUNT(*) AS total FROM payments p JOIN buildings b ON b.id=(SELECT building_id FROM units WHERE id=p.unit_id) ${where}`,
+    values,
+  )) as unknown as [[{ total: number }], unknown];
+  ok(
+    res,
+    rows,
+    "Payments retrieved",
+    pageMeta(page, limit, Number(count.total)),
+  );
+});
+export const getPayment = asyncHandler(async (req, res) =>
+  ok(res, await getReceipt(resourceId(req)), "Payment retrieved"),
+);
+export const createPayment = asyncHandler(async (req, res) => {
+  const data = await recordPayment(
+    {
+      tenantId: req.body.tenant_id,
+      unitId: req.body.unit_id,
+      leaseId: req.body.lease_id,
+      amount: req.body.amount,
+      paymentDate: req.body.payment_date,
+      paymentMethod: req.body.payment_method,
+      transactionReference: req.body.transaction_reference,
+      periodFrom: req.body.period_from,
+      periodTo: req.body.period_to,
+      notes: req.body.notes,
+    },
+    req.user!.id,
+    req.ip,
+  );
+  ok(res, data, "Payment recorded successfully");
+});
+export const paymentReceipt = asyncHandler(async (req, res) =>
+  ok(res, await getReceipt(resourceId(req)), "Receipt retrieved"),
+);
+export const listMaintenance = asyncHandler(async (req, res) => {
+  const filters: string[] = [];
+  const values: Array<string | number | null> = [];
+  if (req.query.building_id) {
+    filters.push("m.building_id=?");
+    values.push(Number(req.query.building_id));
+  }
+  if (req.query.status) {
+    filters.push("m.status=?");
+    values.push(String(req.query.status));
+  }
+  if (req.query.priority) {
+    filters.push("m.priority=?");
+    values.push(String(req.query.priority));
+  }
+  if (req.query.unit_id) {
+    filters.push("m.unit_id=?");
+    values.push(Number(req.query.unit_id));
+  }
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const [rows] = await pool.execute(
+    `SELECT m.*,b.name AS building,u.unit_number,t.full_name AS tenant,usr.name AS assigned_name FROM maintenance_requests m JOIN buildings b ON b.id=m.building_id LEFT JOIN units u ON u.id=m.unit_id LEFT JOIN tenants t ON t.id=m.tenant_id LEFT JOIN users usr ON usr.id=m.assigned_to ${where} ORDER BY m.created_at DESC`,
+    values,
+  );
+  ok(res, rows);
+});
+export const getMaintenance = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  const [[item]] = (await pool.execute(
+    "SELECT m.*,b.name AS building,u.unit_number,t.full_name AS tenant,usr.name AS assigned_name FROM maintenance_requests m JOIN buildings b ON b.id=m.building_id LEFT JOIN units u ON u.id=m.unit_id LEFT JOIN tenants t ON t.id=m.tenant_id LEFT JOIN users usr ON usr.id=m.assigned_to WHERE m.id=?",
+    [id],
+  )) as unknown as [[Record<string, unknown>], unknown];
+  if (!item) throw new AppError(404, "Maintenance request not found");
+  ok(res, item);
+});
+export const createMaintenance = asyncHandler(async (req, res) => {
+  const number = `MR-${Date.now()}`;
+  const [result] = await pool.execute(
+    "INSERT INTO maintenance_requests(request_number,building_id,unit_id,tenant_id,title,description,priority,status,assigned_to,estimated_cost) VALUES (?,?,?,?,?,?,?,'OPEN',?,?)",
+    [
+      number,
+      req.body.building_id,
+      req.body.unit_id ?? null,
+      req.body.tenant_id ?? null,
+      req.body.title,
+      req.body.description ?? null,
+      req.body.priority ?? "MEDIUM",
+      req.body.assigned_to ?? null,
+      req.body.estimated_cost ?? 0,
+    ],
+  );
+  const id = insertId(result);
+  await audit(
+    req.user?.id,
+    "CREATE_MAINTENANCE",
+    "MAINTENANCE",
+    id,
+    `Maintenance ${number} created`,
+    req.ip,
+  );
+  ok(
+    res,
+    { id, request_number: number },
+    "Maintenance request created successfully",
+  );
+});
+export const updateMaintenance = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  await pool.execute(
+    "UPDATE maintenance_requests SET status=COALESCE(?,status),priority=COALESCE(?,priority),assigned_to=COALESCE(?,assigned_to),actual_cost=COALESCE(?,actual_cost),resolved_at=IF(?='COMPLETED',NOW(),resolved_at) WHERE id=?",
+    [
+      req.body.status ?? null,
+      req.body.priority ?? null,
+      req.body.assigned_to ?? null,
+      req.body.actual_cost ?? null,
+      req.body.status ?? null,
+      id,
+    ],
+  );
+  await audit(
+    req.user?.id,
+    "UPDATE_MAINTENANCE",
+    "MAINTENANCE",
+    id,
+    "Maintenance request updated",
+    req.ip,
+  );
+  ok(res, { id }, "Maintenance request updated successfully");
+});
+export const deleteMaintenance = asyncHandler(async (req, res) => {
+  const id = resourceId(req);
+  await pool.execute(
+    "UPDATE maintenance_requests SET status='CANCELLED' WHERE id=?",
+    [id],
+  );
+  await audit(
+    req.user?.id,
+    "DELETE_MAINTENANCE",
+    "MAINTENANCE",
+    id,
+    "Maintenance request cancelled",
+    req.ip,
+  );
+  ok(res, { id }, "Maintenance request cancelled successfully");
+});
+export const dashboard = asyncHandler(async (_req, res) => {
+  const [propertyRows] = await pool.query(
+    "SELECT COUNT(DISTINCT building_id) AS total_buildings,COUNT(*) AS total_units,SUM(status='OCCUPIED') AS occupied_units,SUM(status='VACANT') AS vacant_units,COALESCE(SUM(monthly_rent),0) AS expected_monthly_rent FROM units",
+  );
+  const [floorRows] = await pool.query(
+    "SELECT COUNT(*) AS total_floors FROM floors",
+  );
+  const [rentRows] = await pool.query(
+    "SELECT COALESCE(SUM(amount),0) AS collected_this_month FROM payments WHERE YEAR(payment_date)=YEAR(CURDATE()) AND MONTH(payment_date)=MONTH(CURDATE())",
+  );
+  const [tenantRows] = await pool.query(
+    "SELECT COUNT(*) AS total_tenants,SUM(status='ACTIVE') AS active_tenants FROM tenants",
+  );
+  const [maintenanceRows] = await pool.query(
+    "SELECT SUM(status IN ('OPEN','IN_PROGRESS','ON_HOLD')) AS open_requests,SUM(priority='URGENT' AND status<>'COMPLETED') AS urgent_requests,SUM(status='COMPLETED') AS completed_requests,COALESCE(SUM(actual_cost),0) AS maintenance_cost FROM maintenance_requests",
+  );
+  const [recentPaymentRows] = await pool.query(
+    "SELECT p.id,p.receipt_number,p.amount,p.payment_date,p.payment_method,t.full_name AS tenant,u.unit_number,b.name AS building FROM payments p JOIN tenants t ON t.id=p.tenant_id LEFT JOIN units u ON u.id=p.unit_id LEFT JOIN buildings b ON b.id=u.building_id ORDER BY p.payment_date DESC LIMIT 5",
+  );
+  const [overdueRows] = await pool.query(
+    "SELECT t.full_name AS tenant,u.unit_number,b.name AS building,SUM(rc.amount_due - rc.amount_paid) AS balance,MAX(DATEDIFF(CURDATE(), rc.due_date)) AS days_overdue FROM rent_charges rc JOIN tenants t ON t.id=rc.tenant_id JOIN units u ON u.id=rc.unit_id JOIN buildings b ON b.id=u.building_id WHERE rc.amount_due > rc.amount_paid GROUP BY t.id,u.id,b.id ORDER BY balance DESC LIMIT 5",
+  );
+  const [leaseRows] = await pool.query(
+    "SELECT t.full_name AS tenant,u.unit_number,b.name AS building,l.end_date,DATEDIFF(l.end_date, CURDATE()) AS days_left FROM leases l JOIN tenants t ON t.id=l.tenant_id JOIN units u ON u.id=l.unit_id JOIN buildings b ON b.id=u.building_id WHERE l.status='ACTIVE' AND l.end_date >= CURDATE() ORDER BY l.end_date ASC LIMIT 5",
+  );
+  const [activityRows] = await pool.query(
+    "SELECT a.action,a.entity_type,a.description,a.created_at,u.name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 6",
+  );
+  const property = (propertyRows as Array<Record<string, unknown>>)[0];
+  const floors = (floorRows as Array<Record<string, unknown>>)[0];
+  const rent = (rentRows as Array<Record<string, unknown>>)[0];
+  const tenant = (tenantRows as Array<Record<string, unknown>>)[0];
+  const maintenance = (maintenanceRows as Array<Record<string, unknown>>)[0];
+
+  const expectedMonthlyRent = Number(property.expected_monthly_rent ?? 0);
+  const collectedThisMonth = Number(rent.collected_this_month ?? 0);
+
+  ok(res, {
+    property: {
+      ...property,
+      ...floors,
+      occupancy_percentage: Number(property.total_units)
+        ? Math.round(
+            (Number(property.occupied_units) / Number(property.total_units)) *
+              100,
+          )
+        : 0,
+    },
+    rent: {
+      ...rent,
+      outstanding: Math.max(expectedMonthlyRent - collectedThisMonth, 0),
+      collection_percentage: expectedMonthlyRent
+        ? Math.round((collectedThisMonth / expectedMonthlyRent) * 100)
+        : 0,
+    },
+    tenants: tenant,
+    maintenance,
+    recent_payments: recentPaymentRows,
+    overdue_tenants: overdueRows,
+    expiring_leases: leaseRows,
+    recent_activity: activityRows,
+  });
+});
+export const arrears = asyncHandler(async (req, res) => {
+  const filters: string[] = ["rc.amount_due>rc.amount_paid"];
+  const values: Array<string | number | null> = [];
+  if (req.query.building_id) {
+    filters.push("b.id=?");
+    values.push(Number(req.query.building_id));
+  }
+  if (req.query.tenant_id || req.params.tenantId) {
+    filters.push("t.id=?");
+    values.push(Number(req.query.tenant_id ?? req.params.tenantId));
+  }
+  const minimumDays = req.query.days_overdue
+    ? Number(req.query.days_overdue)
+    : null;
+  const minimumAmount = req.query.amount ? Number(req.query.amount) : null;
+  const [rows] = await pool.execute(
+    `SELECT t.id AS tenant_id,t.full_name,t.business_name,b.name AS building,u.unit_number,SUM(rc.amount_due) AS amount_due,SUM(rc.amount_paid) AS amount_paid,SUM(rc.amount_due-rc.amount_paid) AS balance,MIN(rc.due_date) AS due_date,GREATEST(DATEDIFF(CURDATE(),MIN(rc.due_date)),0) AS days_overdue,CASE WHEN MIN(rc.due_date)<CURDATE() THEN 'OVERDUE' ELSE 'UNPAID' END AS status FROM rent_charges rc JOIN tenants t ON t.id=rc.tenant_id JOIN units u ON u.id=rc.unit_id JOIN buildings b ON b.id=u.building_id WHERE ${filters.join(" AND ")} GROUP BY t.id,b.name,u.unit_number HAVING (? IS NULL OR days_overdue>=?) AND (? IS NULL OR balance>=?)`,
+    [...values, minimumDays, minimumDays, minimumAmount, minimumAmount],
+  );
+  ok(res, rows);
+});
+export const auditLogs = asyncHandler(async (_req, res) => {
+  const [rows] = await pool.query(
+    "SELECT a.*,u.name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 200",
+  );
+  ok(res, rows);
+});
+export const report = asyncHandler(async (req, res) => {
+  const sql = req.path.endsWith("occupancy")
+    ? "SELECT b.name,COUNT(u.id) AS total_units,SUM(u.status='OCCUPIED') AS occupied_units,SUM(u.status='VACANT') AS vacant_units FROM buildings b LEFT JOIN units u ON u.building_id=b.id GROUP BY b.id"
+    : req.path.endsWith("rent")
+      ? "SELECT DATE_FORMAT(payment_date,'%Y-%m') AS period,SUM(amount) AS collected FROM payments GROUP BY period ORDER BY period"
+      : "SELECT payment_date,receipt_number,amount,payment_method FROM payments ORDER BY payment_date DESC LIMIT 500";
+  const [rows] = await pool.query(sql);
+  ok(res, rows, "Report retrieved");
+});
